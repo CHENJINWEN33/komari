@@ -67,6 +67,32 @@ else
 fi
 ok "反向代理：$PROXY"
 
+# 443 被别的程序占用是很常见的情况（xray、其他 Web 服务、Docker 容器等）。
+# 必须在动手写配置前就发现，否则用户装完 certbot、跑到一半才在 nginx -t
+# 撞墙。占用时改用备用端口——对 MCP 客户端来说非标准端口毫无影响，
+# 它只是 URL 里的一个数字。
+HTTPS_PORT="443"
+port_owner() { # port_owner <端口> -> 打印占用它的进程名
+    ss -tlnpH 2>/dev/null | awk -v p=":$1\$" '$4 ~ p {print $0}' \
+        | grep -oE 'users:\(\("[^"]+' | grep -oE '"[^"]+' | tr -d '"' | head -1
+}
+OWNER="$(port_owner 443 || true)"
+if [ -n "$OWNER" ] && [ "$OWNER" != "$PROXY" ]; then
+    echo
+    warn "443 端口已被 ${C_YEL}$OWNER${C_OFF} 占用，$PROXY 无法监听它。"
+    hint "常见于同机跑了 xray / 其他站点 / Docker 容器。"
+    hint "改用备用端口即可，MCP 客户端不在意端口号；面板地址也会带上这个端口。"
+    HTTPS_PORT=$(ask "改用哪个端口？" "25443")
+    case "$HTTPS_PORT" in
+        ''|*[!0-9]*) die "端口必须是数字。";;
+    esac
+    [ "$HTTPS_PORT" -ge 1 ] && [ "$HTTPS_PORT" -le 65535 ] || die "端口超出范围：$HTTPS_PORT"
+    BUSY="$(port_owner "$HTTPS_PORT" || true)"
+    [ -z "$BUSY" ] || die "$HTTPS_PORT 也被 $BUSY 占用了，换一个再试。"
+    ok "HTTPS 将监听 $HTTPS_PORT"
+    hint "记得在防火墙/云厂商安全组里放行 $HTTPS_PORT"
+fi
+
 # ---------- 2. 收集参数 ----------
 
 echo
@@ -162,11 +188,23 @@ if [ "$PROXY" = "nginx" ]; then
         hint "检测到已有 connection_upgrade 映射，不重复定义"
     fi
 
+    # 只有监听标准 443 时，80 跳 443 才有意义；非标准端口下用户必须带端口
+    # 访问，做跳转反而会把访客送到一个不存在的地址。
+    HTTP_REDIRECT=""
+    if [ "$HTTPS_PORT" = "443" ] && [ -z "$(port_owner 80 || true)" -o "$(port_owner 80 || true)" = "nginx" ]; then
+        HTTP_REDIRECT='server {
+    listen 80;
+    server_name '"$DOMAIN"';
+    return 301 https://$host$request_uri;
+}
+'
+    fi
+
     cat > "$CONF" <<NGINX
 # 由 setup-mcp-proxy.sh 生成
 ${MAP_BLOCK}
 server {
-    listen 443 ssl;
+    listen $HTTPS_PORT ssl;
     http2 on;
     server_name $DOMAIN;
 
@@ -209,11 +247,7 @@ server {
     }
 }
 
-server {
-    listen 80;
-    server_name $DOMAIN;
-    return 301 https://\$host\$request_uri;
-}
+${HTTP_REDIRECT}
 NGINX
 
     if ! nginx -t 2>&1 | tail -3; then
@@ -229,6 +263,10 @@ else
     [ -f "$CADDYFILE" ] && { cp "$CADDYFILE" "$CADDYFILE.bak.$(date +%s)"; ok "已备份原有 Caddyfile"; }
     touch "$CADDYFILE"
 
+    # Caddy 用 "域名:端口" 表示非标准端口；标准 443 则直接写域名（它会自动
+    # 同时处理 80 跳转与证书申请）。
+    if [ "$HTTPS_PORT" = "443" ]; then CADDY_SITE="$DOMAIN"; else CADDY_SITE="$DOMAIN:$HTTPS_PORT"; fi
+
     if grep -q "^$DOMAIN" "$CADDYFILE" 2>/dev/null; then
         die "Caddyfile 里已存在 $DOMAIN 的站点块，请手动处理后重试，以免覆盖你的配置。"
     fi
@@ -236,7 +274,7 @@ else
     cat >> "$CADDYFILE" <<CADDY
 
 # 由 setup-mcp-proxy.sh 生成
-$DOMAIN {
+${CADDY_SITE} {
     # MCP 入口：路径自带密钥，由 Caddy 代为注入 Authorization 头
     handle $MCP_PATH* {
         rewrite * /api/mcp
@@ -288,9 +326,10 @@ ok "komari 已重启，仅监听 127.0.0.1:$KOMARI_PORT"
 echo
 info "验证…"
 sleep 4
-URL="https://$DOMAIN$MCP_PATH"
+if [ "$HTTPS_PORT" = "443" ]; then BASE="https://$DOMAIN"; else BASE="https://$DOMAIN:$HTTPS_PORT"; fi
+URL="$BASE$MCP_PATH"
 
-PANEL_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://$DOMAIN/" || echo 000)
+PANEL_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$BASE/" || echo 000)
 case "$PANEL_CODE" in
     200|301|302|307) ok "面板可访问（HTTP $PANEL_CODE）";;
     000) warn "面板无响应。检查 DNS 是否生效、云厂商安全组是否放行 80/443。";;
@@ -325,7 +364,7 @@ umask 077
 cat > "$SUMMARY" <<TXT
 Komari MCP 连接信息（由 setup-mcp-proxy.sh 生成于 $(date -Is)）
 
-面板:      https://$DOMAIN/
+面板:      $BASE/
 MCP URL:   $URL
 
 把上面的 MCP URL 填进 AI 客户端的连接器即可，不需要填任何请求头 ——
@@ -338,7 +377,7 @@ echo
 echo "${C_GRN}========================================${C_OFF}"
 echo "  配置完成"
 echo
-echo "  面板:    https://$DOMAIN/"
+echo "  面板:    $BASE/"
 echo "  MCP URL: ${C_CYA}$URL${C_OFF}"
 echo
 echo "  把 MCP URL 填进 AI 客户端的自定义连接器，请求头留空。"
