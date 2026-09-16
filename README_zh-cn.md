@@ -36,11 +36,24 @@
 ### 使用安装脚本（Linux，推荐）
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CHENJINWEN33/komari/main/install-komari.sh)
+curl -fsSL -o install-komari.sh https://raw.githubusercontent.com/CHENJINWEN33/komari/main/install-komari.sh
+sudo bash install-komari.sh
 ```
 
 交互式安装器，会自动识别架构、配置 systemd 服务，并且**升级、卸载、查看状态、看日志、
-重启**都在同一个菜单里。以后想升级，再跑一次这条命令即可。
+重启**都在同一个菜单里。以后想升级，再跑一次即可。
+
+> **为什么要分两步下载再执行，而不是一行搞定？**
+>
+> 安装器需要 root（要写 `/opt`、`/etc/systemd/system`，并操作系统级 systemd 单元）。
+> 而 `sudo bash <(curl ...)` 会失败：`<(...)` 进程替换产生的 `/dev/fd/63`，
+> 会被 sudo 的 `closefrom` 机制关掉（它默认关闭编号 ≥ 3 的所有文件描述符），
+> 于是报 `No such file or directory`。
+>
+> 改用 `curl ... | sudo bash` 能装，但脚本用裸 `read` 从 stdin 读取输入，
+> 而 stdin 已被脚本自身占用，交互菜单会失效并全部落到默认值。
+>
+> 先下载再执行既保留了交互，也让你有机会在以 root 运行前先审阅脚本内容。
 
 ### 使用二进制文件
 
@@ -86,6 +99,133 @@ go build -o komari .
 上游 CI 用 `zig cc` 交叉编译；在 Windows 上，较旧的 MinGW-w64 工具链
 可能产出调试节偏移不满足 `FileAlignment` 的 PE 文件，导致 Windows 拒绝加载 ——
 遇到这种情况加上 `-ldflags="-s -w"` 即可。
+
+## 生产部署（HTTPS 反向代理）
+
+安装器只负责装 Komari 本体，不配置反向代理。装完后默认监听 `0.0.0.0:25774`，
+也就是**以 HTTP 明文直接暴露在公网**。
+
+这不是可选项：Komari 自带 Web SSH 与远程命令执行功能，一旦管理员密码或 API Key
+被中间链路嗅探，攻击者获得的是你**所有被监控主机**的 shell。上公网前请务必配好 HTTPS。
+
+以下三种情况任选其一。
+
+### 情况一：服务器上还没有反向代理
+
+推荐 Caddy，证书自动申请、自动续期，配置只有两行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key'   | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt'   | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+sudo apt-get update && sudo apt-get install -y caddy
+
+sudo tee /etc/caddy/Caddyfile >/dev/null <<'EOF'
+你的域名.com {
+    reverse_proxy 127.0.0.1:25774
+}
+EOF
+sudo systemctl restart caddy
+```
+
+### 情况二：已经在用 Caddy
+
+**不要覆盖现有的 Caddyfile**，追加一个站点块即可：
+
+```bash
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%s)
+printf '
+%s {
+    reverse_proxy 127.0.0.1:25774
+}
+' "你的域名.com"   | sudo tee -a /etc/caddy/Caddyfile
+sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+```
+
+`tee -a` 的 `-a` 是追加；先备份、再 `validate` 验证语法，避免写错把现有站点搞挂。
+
+### 情况三：已经在用 Nginx
+
+**必须转发 WebSocket 升级头**。探针上报走 `/api/clients/v2/rpc`（WebSocket），
+网页终端同样如此。漏配的话面板能正常打开、探针却永远连不上，而且错误信息很难定位。
+
+先在 `http {}` 块里加（通常放在 `nginx.conf`）：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
+
+再配置站点：
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name 你的域名.com;
+
+    ssl_certificate     /etc/letsencrypt/live/你的域名.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/你的域名.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:25774;
+        proxy_http_version 1.1;
+
+        # WebSocket 必需
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # 探针连接是长连接，超时设短了会被反复断开
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+### 配好反代之后：把 Komari 锁回本机
+
+反代配好后，`25774` 仍然直接监听在公网上，等于给 HTTPS 留了个绕过通道。
+用 systemd drop-in 覆盖，让它只监听回环地址：
+
+```bash
+sudo mkdir -p /etc/systemd/system/komari.service.d
+sudo tee /etc/systemd/system/komari.service.d/override.conf >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/opt/komari/komari server -l 127.0.0.1:25774
+
+# 反代场景下 MCP 必需，原因见下
+Environment=KOMARI_MCP_TRUST_PROXY_HOST=true
+Environment=GIN_MODE=release
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl restart komari
+ss -tlnp | grep 25774      # 应只剩 127.0.0.1
+```
+
+用 drop-in 而不是直接改 `/etc/systemd/system/komari.service`，是因为安装器在升级时
+会重新生成那个文件，直接改会被覆盖；drop-in 在独立目录里，升级后依然生效。
+
+> **反代后 MCP 必须设 `KOMARI_MCP_TRUST_PROXY_HOST=true`**
+>
+> MCP SDK 默认启用 DNS rebinding 防护：当服务监听在回环地址、而请求的 `Host` 头
+> 不是回环地址时返回 403。反向代理场景正好命中——Nginx/Caddy 连的是
+> `127.0.0.1:25774`，转发过来的 `Host` 却是对外域名。不设这个变量，
+> MCP 端点会一直返回 403。
+
+### 最后：先配好 HTTPS，再做首次安装引导
+
+首次安装引导要设置管理员密码。请用 `https://你的域名.com` 打开面板完成引导，
+不要用 `http://服务器IP:25774` —— 后者的密码是明文传输的。
 
 ## MCP 端点
 

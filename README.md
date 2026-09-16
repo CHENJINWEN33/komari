@@ -38,12 +38,26 @@ and the frontend contract are identical to `1.5.0-fix1`.
 ### Install script (Linux, recommended)
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/CHENJINWEN33/komari/main/install-komari.sh)
+curl -fsSL -o install-komari.sh https://raw.githubusercontent.com/CHENJINWEN33/komari/main/install-komari.sh
+sudo bash install-komari.sh
 ```
 
 An interactive installer that detects your architecture, sets up a systemd service, and
-also handles upgrade / uninstall / status / logs from the same menu. Run it again later
-to upgrade.
+also handles upgrade / uninstall / status / logs from the same menu. Run it again to upgrade.
+
+> **Why download first instead of a one-liner?**
+>
+> The installer needs root (it writes to `/opt` and `/etc/systemd/system`, and manages a
+> system systemd unit). `sudo bash <(curl ...)` fails: the `/dev/fd/63` produced by process
+> substitution is closed by sudo's `closefrom` behaviour, which closes every descriptor
+> numbered 3 or above — you get `No such file or directory`.
+>
+> `curl ... | sudo bash` does install, but the script reads input with a bare `read` from
+> stdin, and stdin is already the script itself, so the interactive menus silently fall
+> through to defaults.
+>
+> Downloading first keeps the menus working and lets you read the script before running it
+> as root.
 
 ### Binaries
 
@@ -88,6 +102,133 @@ Requires **Go 1.25** and a working C toolchain (cgo is mandatory: `internal/sqli
 imports `mattn/go-sqlite3` directly). Upstream CI cross-compiles with `zig cc`; on Windows,
 an old MinGW-w64 toolchain can emit a PE whose debug sections violate `FileAlignment`,
 producing a binary Windows refuses to load — add `-ldflags="-s -w"` if you hit that.
+
+## Production deployment (HTTPS)
+
+The installer sets up Komari itself but not a reverse proxy. Out of the box it listens on
+`0.0.0.0:25774` — plain HTTP, directly exposed.
+
+This matters: Komari ships web SSH and remote command execution, so an admin password or
+API key sniffed in transit hands an attacker shells on **every monitored host**. Put HTTPS
+in front of it before exposing it to the internet.
+
+### No reverse proxy yet
+
+Caddy is the shortest path — certificates are requested and renewed automatically:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key'   | sudo gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt'   | sudo tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+sudo apt-get update && sudo apt-get install -y caddy
+
+sudo tee /etc/caddy/Caddyfile >/dev/null <<'EOF'
+your.domain.com {
+    reverse_proxy 127.0.0.1:25774
+}
+EOF
+sudo systemctl restart caddy
+```
+
+### Already running Caddy
+
+**Do not overwrite the existing Caddyfile** — append a site block:
+
+```bash
+sudo cp /etc/caddy/Caddyfile /etc/caddy/Caddyfile.bak.$(date +%s)
+printf '
+%s {
+    reverse_proxy 127.0.0.1:25774
+}
+' "your.domain.com"   | sudo tee -a /etc/caddy/Caddyfile
+sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
+```
+
+### Already running Nginx
+
+**You must forward WebSocket upgrade headers.** Agents report over
+`/api/clients/v2/rpc` (WebSocket), as does the web terminal. Without this the dashboard
+loads fine but agents never connect, and the failure is hard to diagnose.
+
+In your `http {}` block:
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+```
+
+Then the site:
+
+```nginx
+server {
+    listen 443 ssl;
+    http2 on;
+    server_name your.domain.com;
+
+    ssl_certificate     /etc/letsencrypt/live/your.domain.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/your.domain.com/privkey.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:25774;
+        proxy_http_version 1.1;
+
+        # Required for WebSocket
+        proxy_set_header Upgrade    $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+
+        # Agent connections are long-lived
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+}
+```
+
+### Then bind Komari back to loopback
+
+With a proxy in front, port `25774` is still listening publicly — a way around your HTTPS.
+Override it with a systemd drop-in:
+
+```bash
+sudo mkdir -p /etc/systemd/system/komari.service.d
+sudo tee /etc/systemd/system/komari.service.d/override.conf >/dev/null <<'EOF'
+[Service]
+ExecStart=
+ExecStart=/opt/komari/komari server -l 127.0.0.1:25774
+
+# Required for MCP behind a proxy, see below
+Environment=KOMARI_MCP_TRUST_PROXY_HOST=true
+Environment=GIN_MODE=release
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl restart komari
+ss -tlnp | grep 25774      # should show 127.0.0.1 only
+```
+
+A drop-in rather than editing `/etc/systemd/system/komari.service` directly: the installer
+regenerates that file on upgrade, which would discard your edits. Drop-ins live in a
+separate directory and survive.
+
+> **Behind a proxy, MCP needs `KOMARI_MCP_TRUST_PROXY_HOST=true`**
+>
+> The MCP SDK enables DNS rebinding protection by default: it returns 403 when the server
+> listens on loopback but the request's `Host` header is not a loopback address. A reverse
+> proxy hits exactly that — Nginx/Caddy connects to `127.0.0.1:25774` while forwarding your
+> public hostname. Without this variable the MCP endpoint returns 403 every time.
+
+### Run the first-run install guide over HTTPS
+
+The first-run guide is where you set the administrator password. Open
+`https://your.domain.com` for it — not `http://server-ip:25774`, where that password
+travels in clear text.
 
 ## MCP endpoint
 
