@@ -1,8 +1,12 @@
 name: Generate Release Notes
 
 on:
-  release:
-    types: [published]
+  # 自动改写已关闭：本工作流会在 release 发布时覆盖正文。原设计是用
+  # secrets.OPENAI_API_KEY 让 AI 生成说明；未配置该密钥时会退回 GitHub 默认
+  # changelog，把手写的发布说明顶掉（v1.5.0-mcp.1 即因此被覆盖）。
+  # 本 fork 采用手写发布说明，故取消自动触发，保留手动触发备用。
+  # release:
+  #   types: [published]
   workflow_dispatch:
     inputs:
       tag:
