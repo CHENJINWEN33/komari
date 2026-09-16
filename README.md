@@ -132,6 +132,20 @@ It will:
 >
 > The trade-off: that URL *is* the credential. Don't share it.
 
+The script sets up **two MCP entry points**; pick whichever your client supports:
+
+| Method | URL | Auth |
+|---|---|---|
+| **A (preferred)** | `https://domain/api/mcp` | Client picks "No sign-in" and sends `Authorization: Bearer <API Key>` itself |
+| **B** | `https://domain/mcp-<random>` | No headers needed — the proxy injects the token |
+
+Prefer A: the credential never appears in the URL, so it stays out of browser
+history, access logs, and anything you paste to someone else. Use B only when the
+client has nowhere to enter a header.
+
+> The claude.ai connector dialog originally had no header field, which is why B
+> exists. Headers are supported now, so A is the better choice.
+
 The script validates config before reloading, so a mistake cannot take down your
 existing sites. For the manual walkthrough, see the next section.
 

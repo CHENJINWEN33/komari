@@ -5,8 +5,9 @@
 #
 # 做四件事：
 #   1. 在已有的 nginx / Caddy 里新增一个站点（不覆盖任何现有配置）
-#   2. 开一个带密钥的 MCP 入口，由反代代为注入 Authorization 头 ——
-#      因为 claude.ai 连接器的界面填不了请求头
+#   2. 开两个 MCP 入口：
+#      A. /api/mcp     —— 客户端自带 Authorization 头（推荐，凭据不进 URL）
+#      B. /mcp-<密钥>  —— 由反代代为注入，给填不了请求头的客户端用
 #   3. 把 Komari 改为只监听 127.0.0.1，并设置反代场景必需的环境变量
 #   4. 验证，并打印可直接粘贴到 AI 客户端的 URL
 #
@@ -231,8 +232,23 @@ server {
     ssl_certificate     $CERT;
     ssl_certificate_key $KEY;
 
-    # MCP 入口：路径自带密钥，由 nginx 代为注入 Authorization 头。
-    # claude.ai 连接器界面无法填写请求头，只能走这种方式。
+    # MCP 入口 A：客户端自带 Authorization 头时走这里（更安全，凭据不进 URL）。
+    # 必须单独开一个 location —— 下面的 location / 没关缓冲，SSE 推流会被卡住。
+    location = /api/mcp {
+        proxy_pass http://127.0.0.1:$KOMARI_PORT/api/mcp;
+        proxy_http_version 1.1;
+
+        proxy_set_header Host              \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+
+        proxy_buffering           off;
+        proxy_cache               off;
+        chunked_transfer_encoding off;
+        proxy_read_timeout        3600s;
+    }
+
+    # MCP 入口 B：路径自带密钥，由 nginx 代为注入 Authorization 头。
+    # 给填不了请求头的客户端用。
     location = $MCP_PATH {
         proxy_pass http://127.0.0.1:$KOMARI_PORT/api/mcp;
         proxy_http_version 1.1;
@@ -295,7 +311,13 @@ else
 
 # 由 setup-mcp-proxy.sh 生成
 ${CADDY_SITE} {
-    # MCP 入口：路径自带密钥，由 Caddy 代为注入 Authorization 头
+    # MCP 入口 A：客户端自带 Authorization 头时走这里（凭据不进 URL）。
+    # Caddy 的 reverse_proxy 默认就支持流式响应，无需额外配置。
+    handle /api/mcp* {
+        reverse_proxy 127.0.0.1:$KOMARI_PORT
+    }
+
+    # MCP 入口 B：路径自带密钥，由 Caddy 代为注入 Authorization 头
     handle $MCP_PATH* {
         rewrite * /api/mcp
         reverse_proxy 127.0.0.1:$KOMARI_PORT {
@@ -384,13 +406,20 @@ umask 077
 cat > "$SUMMARY" <<TXT
 Komari MCP 连接信息（由 setup-mcp-proxy.sh 生成于 $(date -Is)）
 
-面板:      $BASE/
-MCP URL:   $URL
+面板: $BASE/
 
-把上面的 MCP URL 填进 AI 客户端的连接器即可，不需要填任何请求头 ——
-$PROXY 已经代为注入 Authorization。
+接入方式二选一：
 
-这个 URL 里含有密钥，等同管理员凭据，请勿公开分享。
+【方式 A：自带请求头】推荐。凭据不会出现在 URL 里，也不会进浏览器历史和访问日志。
+  URL:    $BASE/api/mcp
+  认证:   选择 "No sign-in"（不走 OAuth）
+  请求头: Authorization: Bearer $API_KEY
+
+【方式 B：密钥在 URL 里】给填不了请求头的客户端用。
+  URL:    $URL
+  请求头: 不需要填，$PROXY 会代为注入
+
+两者都等同管理员凭据，请勿公开分享。
 TXT
 
 echo
@@ -398,9 +427,15 @@ echo "${C_GRN}========================================${C_OFF}"
 echo "  配置完成"
 echo
 echo "  面板:    $BASE/"
-echo "  MCP URL: ${C_CYA}$URL${C_OFF}"
 echo
-echo "  把 MCP URL 填进 AI 客户端的自定义连接器，请求头留空。"
+echo "  ${C_CYA}方式 A（推荐，凭据不进 URL）${C_OFF}"
+echo "    URL:    $BASE/api/mcp"
+echo "    认证:   选 \"No sign-in\""
+echo "    请求头: Authorization: Bearer <你的 API Key>"
+echo
+echo "  ${C_CYA}方式 B（客户端填不了请求头时用）${C_OFF}"
+echo "    URL:    $URL"
+echo "    请求头: 留空，$PROXY 已代为注入"
 echo "  已保存到 $SUMMARY（仅 root 可读）"
 echo
 echo "  ${C_YEL}这个 URL 等同管理员凭据，不要公开分享。${C_OFF}"
