@@ -56,7 +56,9 @@ BACKUP_DIR="$INSTALL_DIR/backup"
 DATA_BACKUP_DIR="$DATA_DIR/data/backup"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
-STANDARD_REPO="komari-monitor/komari"
+# 本 fork 的发布仓库。上游 komari-monitor/komari 已于 2026-09-16 归档，
+# 本安装器改为分发本 fork 的构建产物（在上游 1.5.0-fix1 基础上新增 MCP 端点）。
+STANDARD_REPO="CHENJINWEN33/komari"
 LITE_REPO="nuomiiiii/komari"
 REPO="$STANDARD_REPO"
 # 发行版本: standard（标准版）或 lite（Lite 轻量版）
@@ -156,16 +158,16 @@ msg() {
             zh_text='Komari 目前提供多个版本，不同版本在功能和性能上有所差异，请根据主控配置选择。\n\n请选择安装的版本（默认 1）：'
             ;;
         edition_standard)
-            en_text='Standard edition'
-            zh_text='标准版本'
+            en_text='Standard edition (MCP fork) - upstream 1.5.0-fix1 plus an MCP endpoint for AI agents'
+            zh_text='标准版本（MCP fork）- 上游 1.5.0-fix1 基础上新增供 AI agent 接入的 MCP 端点'
             ;;
         edition_lite)
             en_text='Lite edition - optimized for low-resource controllers with a streamlined feature set (maintained by @nuomiiiii)'
             zh_text='Lite 版本 - 改善低配置主控下的性能，精简复杂功能（由 @nuomiiiii 维护）'
             ;;
         edition_name_standard)
-            en_text='Komari Standard'
-            zh_text='Komari 标准版'
+            en_text='Komari Standard (MCP fork)'
+            zh_text='Komari 标准版（MCP fork）'
             ;;
         edition_name_lite)
             en_text='Komari Lite'
@@ -314,6 +316,10 @@ msg() {
         snapshot_not_found)
             en_text='No snapshot release was found.'
             zh_text='未找到快照版本。'
+            ;;
+        snapshot_fallback_stable)
+            en_text='No snapshot release found in this fork; falling back to the stable release.'
+            zh_text='本仓库暂无快照版本，已自动改用稳定版。'
             ;;
         snapshot_found)
             en_text='Latest snapshot: %s'
@@ -941,9 +947,14 @@ get_download_url() {
         log_info "$(msg fetch_snapshot)" >&2
         local latest_snapshot=$(curl -s "https://api.github.com/repos/${REPO}/releases" | grep '"tag_name"' | grep 'Snapshot-' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
 
+        # 本 fork 默认关闭了 snapshot 自动发布（见 .github/workflows/snapshot.yml），
+        # 多数情况下不存在快照版本。此时回退到稳定版而非直接失败，
+        # 否则选了快照通道的用户会拿到一个无法继续的错误。
         if [ -z "$latest_snapshot" ]; then
-            log_error "$(msg snapshot_not_found)" >&2
-            return 1
+            log_info "$(msg snapshot_fallback_stable)" >&2
+            CHANNEL="stable"
+            echo "https://github.com/${REPO}/releases/latest/download/${file_name}"
+            return 0
         fi
 
         log_info "$(msg snapshot_found "$latest_snapshot")" >&2
