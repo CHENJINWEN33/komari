@@ -205,17 +205,20 @@ if [ "$PROXY" = "nginx" ]; then
     CONF="/etc/nginx/conf.d/komari-mcp.conf"
     [ -f "$CONF" ] && { cp "$CONF" "$CONF.bak.$(date +%s)"; warn "已备份原有 $CONF"; }
 
-    # map 只能定义在 http 块内，且全局唯一；已存在就不要重复定义。
-    MAP_BLOCK=""
-    if ! nginx -T 2>/dev/null | grep -q 'connection_upgrade'; then
-        MAP_BLOCK='map $http_upgrade $connection_upgrade {
+    # WebSocket 升级需要一个 map 变量。用带 komari_ 前缀的独占名字，始终自己定义：
+    #
+    # 曾经的做法是先 nginx -T | grep connection_upgrade 判断是否已存在。但
+    # nginx -T dump 的是当前生效配置，其中就包含上一次运行生成的本文件——
+    # 脚本会把自己的定义误认作别人的，于是这次不写；而本次又覆盖了该文件，
+    # 导致 map 彻底消失，nginx 报 unknown "connection_upgrade" variable。
+    #
+    # 独占命名让检测变得不必要：map 定义的是变量，不同变量名互不冲突，
+    # 即使别处也定义了 $connection_upgrade 也不会重复定义。
+    MAP_BLOCK='map $http_upgrade $komari_conn_upgrade {
     default upgrade;
     ""      close;
 }
 '
-    else
-        hint "检测到已有 connection_upgrade 映射，不重复定义"
-    fi
 
     # 只有监听标准 443 时，80 跳 443 才有意义；非标准端口下用户必须带端口
     # 访问，做跳转反而会把访客送到一个不存在的地址。
@@ -240,13 +243,18 @@ server {
     ssl_certificate     $CERT;
     ssl_certificate_key $KEY;
 
+    # 注意各处都用 \$http_host 而非 \$host：\$host 会去掉端口号，而 Komari 的
+    # CORS 中间件（web/security/cors.go）拿浏览器的 Origin 和 Host 做全等比较。
+    # 非标准端口下 Origin 是 "https://域名:25443"、Host 若变成 "域名" 就对不上，
+    # 所有带 Origin 的请求（即浏览器发出的每个 POST，含登录）都会被判 403。
+
     # MCP 入口 A：客户端自带 Authorization 头时走这里（更安全，凭据不进 URL）。
     # 必须单独开一个 location —— 下面的 location / 没关缓冲，SSE 推流会被卡住。
     location = /api/mcp {
         proxy_pass http://127.0.0.1:$KOMARI_PORT/api/mcp;
         proxy_http_version 1.1;
 
-        proxy_set_header Host              \$host;
+        proxy_set_header Host              \$http_host;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
         proxy_buffering           off;
@@ -262,7 +270,7 @@ server {
         proxy_http_version 1.1;
 
         proxy_set_header Authorization     "Bearer $API_KEY";
-        proxy_set_header Host              \$host;
+        proxy_set_header Host              \$http_host;
         proxy_set_header X-Forwarded-Proto \$scheme;
 
         # MCP 走 SSE 推流。nginx 默认缓冲响应会把流卡住，必须关掉。
@@ -279,9 +287,9 @@ server {
 
         # 探针走 WebSocket（/api/clients/v2/rpc），漏了这两行面板能开但探针连不上
         proxy_set_header Upgrade    \$http_upgrade;
-        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header Connection \$komari_conn_upgrade;
 
-        proxy_set_header Host              \$host;
+        proxy_set_header Host              \$http_host;
         proxy_set_header X-Real-IP         \$remote_addr;
         proxy_set_header X-Forwarded-For   \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
