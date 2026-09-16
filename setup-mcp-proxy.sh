@@ -116,11 +116,22 @@ API_KEY=""
 DB="$KOMARI_DIR/data/komari.db"
 if [ -f "$DB" ] && command -v python3 >/dev/null 2>&1; then
     API_KEY=$(python3 - "$DB" <<'PY' 2>/dev/null || true
-import sqlite3,sys
+import json, sqlite3, sys
 try:
-    r=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro",uri=True).execute(
+    r = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True).execute(
         "select value from configs where key='api_key'").fetchone()
-    print((r[0] or "").strip() if r else "")
+    raw = (r[0] or "") if r else ""
+    # configs 表里的值是 JSON 编码的：字符串带引号存放（'"komari-xxx"'）。
+    # 直接拿原始值会把引号一起写进 nginx 配置，生成
+    #   proxy_set_header Authorization "Bearer "komari-xxx"";
+    # nginx 报 unexpected "k"。所以必须先解码。
+    try:
+        v = json.loads(raw)
+        if not isinstance(v, str):
+            v = ""
+    except Exception:
+        v = raw          # 万一哪天改成明文存储，原样使用
+    print(v.strip())
 except Exception:
     print("")
 PY
@@ -136,6 +147,15 @@ else
     API_KEY=$(ask "Komari API Key")
     [ "${#API_KEY}" -ge 12 ] || die "API Key 至少 12 位，Komari 会拒绝更短的值。"
 fi
+
+# API Key 会被原样嵌进反代配置的双引号字符串里。含引号、反斜杠、分号或
+# 空白都会破坏配置语法（甚至注入额外指令），此处直接拒绝而不是尝试转义——
+# Komari 生成的 Key 是 "komari-" 加随机字母数字，不会命中这些字符。
+case "$API_KEY" in
+    *'"'*|*'\'*|*';'*|*' '*|*"$(printf '\t')"*)
+        die "API Key 含引号、反斜杠、分号或空白字符，无法安全写入 $PROXY 配置。
+       请在 Komari 后台重新生成一个标准格式的 Key。";;
+esac
 
 # URL 密钥：出现在 URL 路径里，等同密码，所以用随机值而非用户输入。
 if command -v openssl >/dev/null 2>&1; then
