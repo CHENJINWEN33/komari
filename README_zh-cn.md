@@ -33,9 +33,18 @@
 
 ## 快速开始
 
+### 使用安装脚本（Linux，推荐）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/CHENJINWEN33/komari/main/install-komari.sh)
+```
+
+交互式安装器，会自动识别架构、配置 systemd 服务，并且**升级、卸载、查看状态、看日志、
+重启**都在同一个菜单里。以后想升级，再跑一次这条命令即可。
+
 ### 使用二进制文件
 
-从 [Releases](https://github.com/CHENJINWEN33/komari/releases) 下载对应平台的文件并运行：
+或者从 [Releases](https://github.com/CHENJINWEN33/komari/releases) 下载对应平台的文件并运行：
 
 ```bash
 ./komari server            # 监听 0.0.0.0:25774

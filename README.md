@@ -35,10 +35,20 @@ and the frontend contract are identical to `1.5.0-fix1`.
 
 ## Quick start
 
+### Install script (Linux, recommended)
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/CHENJINWEN33/komari/main/install-komari.sh)
+```
+
+An interactive installer that detects your architecture, sets up a systemd service, and
+also handles upgrade / uninstall / status / logs from the same menu. Run it again later
+to upgrade.
+
 ### Binaries
 
-Grab the build for your platform from [Releases](https://github.com/CHENJINWEN33/komari/releases)
-and run it:
+Or grab the build for your platform from
+[Releases](https://github.com/CHENJINWEN33/komari/releases) and run it:
 
 ```bash
 ./komari server            # listens on 0.0.0.0:25774
