@@ -67,6 +67,8 @@ else
        apt-get update && apt-get install -y caddy"
 fi
 ok "反向代理：$PROXY"
+NGINX_WAS_RUNNING=0
+systemctl is-active --quiet nginx 2>/dev/null && NGINX_WAS_RUNNING=1
 
 # 443 被别的程序占用是很常见的情况（xray、其他 Web 服务、Docker 容器等）。
 # 必须在动手写配置前就发现，否则用户装完 certbot、跑到一半才在 nginx -t
@@ -88,8 +90,14 @@ if [ -n "$OWNER" ] && [ "$OWNER" != "$PROXY" ]; then
         ''|*[!0-9]*) die "端口必须是数字。";;
     esac
     [ "$HTTPS_PORT" -ge 1 ] && [ "$HTTPS_PORT" -le 65535 ] || die "端口超出范围：$HTTPS_PORT"
+    # 占用者是本次要配置的反代时不算冲突——那正是上一次运行留下的监听，
+    # 本次会重写它的配置。脚本必须可重复运行。
     BUSY="$(port_owner "$HTTPS_PORT" || true)"
-    [ -z "$BUSY" ] || die "$HTTPS_PORT 也被 $BUSY 占用了，换一个再试。"
+    if [ -n "$BUSY" ] && [ "$BUSY" != "$PROXY" ]; then
+        die "$HTTPS_PORT 也被 $BUSY 占用了，换一个再试。"
+    elif [ -n "$BUSY" ]; then
+        hint "$HTTPS_PORT 当前由 $PROXY 监听（上次运行的结果），本次会重写其配置"
+    fi
     ok "HTTPS 将监听 $HTTPS_PORT"
     hint "记得在防火墙/云厂商安全组里放行 $HTTPS_PORT"
 fi
@@ -290,8 +298,11 @@ NGINX
         rm -f "$CONF"
         die "nginx 配置校验失败，已删除新增的配置文件，现有站点未受影响。"
     fi
-    systemctl reload nginx
-    ok "nginx 已重载"
+    # reload 只对运行中的服务有效。用户可能为了腾端口手动停过 nginx，
+    # 此时必须 start 而不是 reload，否则脚本中止且站点一直停着。
+    systemctl reload-or-restart nginx
+    systemctl is-active --quiet nginx || die "nginx 启动失败，执行 journalctl -u nginx -n 30 查看原因。"
+    ok "nginx 已$([ "$NGINX_WAS_RUNNING" = "1" ] && echo 重载 || echo 启动)"
 
 else
     CADDYFILE="/etc/caddy/Caddyfile"
@@ -335,8 +346,9 @@ CADDY
     if ! caddy validate --config "$CADDYFILE" 2>&1 | tail -3; then
         die "Caddyfile 校验失败。原文件已备份为 $CADDYFILE.bak.*，请还原后排查。"
     fi
-    systemctl reload caddy
-    ok "Caddy 已重载"
+    systemctl reload-or-restart caddy
+    systemctl is-active --quiet caddy || die "Caddy 启动失败，执行 journalctl -u caddy -n 30 查看原因。"
+    ok "Caddy 已就绪"
 fi
 
 # ---------- 5. 把 Komari 锁回本机 ----------
