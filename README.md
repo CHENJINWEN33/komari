@@ -103,6 +103,52 @@ imports `mattn/go-sqlite3` directly). Upstream CI cross-compiles with `zig cc`; 
 an old MinGW-w64 toolchain can emit a PE whose debug sections violate `FileAlignment`,
 producing a binary Windows refuses to load — add `-ldflags="-s -w"` if you hit that.
 
+## One-command HTTPS setup for MCP
+
+If you just want an AI client to reach the MCP endpoint and would rather not
+hand-write proxy config:
+
+```bash
+curl -fsSL -o setup-mcp-proxy.sh https://raw.githubusercontent.com/CHENJINWEN33/komari/main/setup-mcp-proxy.sh
+sudo bash setup-mcp-proxy.sh
+```
+
+It will:
+
+1. Detect whether you run nginx or Caddy and **add a site file without
+   overwriting anything that already exists**
+2. Handle certificates (certbot for nginx, automatic for Caddy)
+3. Expose a secret-bearing MCP path where the proxy **injects the
+   `Authorization` header for you**
+4. Bind Komari to `127.0.0.1` and set `KOMARI_MCP_TRUST_PROXY_HOST=true`
+5. Verify the handshake and print a URL you can paste straight into a client
+
+> **Why inject the header?**
+>
+> The claude.ai connector dialog has no field for request headers, so the client
+> cannot send `Authorization` itself. The script puts the secret in the URL path
+> instead; the proxy validates it, strips it, and adds the `Bearer` header before
+> forwarding. The connector then only needs a URL.
+>
+> The trade-off: that URL *is* the credential. Don't share it.
+
+The script sets up **two MCP entry points**; pick whichever your client supports:
+
+| Method | URL | Auth |
+|---|---|---|
+| **A (preferred)** | `https://domain/api/mcp` | Client picks "No sign-in" and sends `Authorization: Bearer <API Key>` itself |
+| **B** | `https://domain/mcp-<random>` | No headers needed — the proxy injects the token |
+
+Prefer A: the credential never appears in the URL, so it stays out of browser
+history, access logs, and anything you paste to someone else. Use B only when the
+client has nowhere to enter a header.
+
+> The claude.ai connector dialog originally had no header field, which is why B
+> exists. Headers are supported now, so A is the better choice.
+
+The script validates config before reloading, so a mistake cannot take down your
+existing sites. For the manual walkthrough, see the next section.
+
 ## Production deployment (HTTPS)
 
 The installer sets up Komari itself but not a reverse proxy. Out of the box it listens on

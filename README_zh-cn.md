@@ -100,6 +100,47 @@ go build -o komari .
 可能产出调试节偏移不满足 `FileAlignment` 的 PE 文件，导致 Windows 拒绝加载 ——
 遇到这种情况加上 `-ldflags="-s -w"` 即可。
 
+## 一键配置 MCP 的 HTTPS 访问
+
+如果你只是想让 AI 客户端能连上 MCP，不想手动折腾反代配置，用这个脚本：
+
+```bash
+curl -fsSL -o setup-mcp-proxy.sh https://raw.githubusercontent.com/CHENJINWEN33/komari/main/setup-mcp-proxy.sh
+sudo bash setup-mcp-proxy.sh
+```
+
+它会自动完成：
+
+1. 检测你用的是 nginx 还是 Caddy，**新增站点配置，不覆盖任何现有文件**
+2. 处理证书（nginx 走 certbot，Caddy 自动申请）
+3. 开一个带随机密钥的 MCP 入口，由反代**代为注入 `Authorization` 头**
+4. 把 Komari 改为只监听 `127.0.0.1`，并设好 `KOMARI_MCP_TRUST_PROXY_HOST=true`
+5. 验证握手，打印可直接粘贴到 AI 客户端的 URL
+
+> **为什么要「代为注入请求头」？**
+>
+> claude.ai 的连接器对话框没有填写请求头的地方，客户端无法自带
+> `Authorization`。所以脚本把密钥放进 URL 路径，反代校验后剥掉密钥段、
+> 补上 `Bearer` 头再转发。这样连接器只需填一个 URL。
+>
+> 代价是这个 URL 本身等同凭据，不要公开分享。
+
+脚本会配好**两个 MCP 入口**，按客户端能力二选一：
+
+| 方式 | URL | 认证 |
+|---|---|---|
+| **A（推荐）** | `https://域名/api/mcp` | 客户端选 "No sign-in"，自行发送 `Authorization: Bearer <API Key>` |
+| **B** | `https://域名/mcp-<随机密钥>` | 不填任何请求头，反代代为注入 |
+
+优先用 A：凭据不会出现在 URL 里，也就不会进浏览器历史、访问日志和分享链接。
+只有当客户端没有填写请求头的地方时才用 B。
+
+> claude.ai 的连接器早期没有请求头输入框，只能用 B。现在已支持请求头，
+> 因此推荐改用 A。
+
+脚本会先做语法校验再重载，配置写错不会影响你现有的站点。
+想了解每一步细节，或需要手动配置，见下一节。
+
 ## 生产部署（HTTPS 反向代理）
 
 安装器只负责装 Komari 本体，不配置反向代理。装完后默认监听 `0.0.0.0:25774`，
