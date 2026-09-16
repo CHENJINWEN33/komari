@@ -24,6 +24,7 @@ func Register(r *gin.Engine) {
 	registerPublicRoutes(r)
 	registerAgentRoutes(r)
 	registerAdminRoutes(r)
+	registerMCPRoutes(r)
 
 	public.Static(r.Group("/"), func(handlers ...gin.HandlerFunc) {
 		r.NoRoute(handlers...)
