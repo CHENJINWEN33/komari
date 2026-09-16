@@ -248,6 +248,13 @@ server {
     # 非标准端口下 Origin 是 "https://域名:25443"、Host 若变成 "域名" 就对不上，
     # 所有带 Origin 的请求（即浏览器发出的每个 POST，含登录）都会被判 403。
 
+    # Komari 的 SPA 回落（web/public/public.go 的 noRoute）会把任何未匹配的
+    # GET 路径都渲染成 index.html 并返回 200。这会波及 /.well-known/*：
+    # MCP 客户端在连接前会探测 OAuth discovery 元数据，拿到 200 + HTML 而非
+    # JSON 或干净的 404，解析失败后报的却是 "Couldn't reach the MCP server"，
+    # 极难定位。本服务不走 OAuth，明确回 404 才是正确信号。
+    location ^~ /.well-known/ { return 404; }
+
     # MCP 入口 A：客户端自带 Authorization 头时走这里（更安全，凭据不进 URL）。
     # 必须单独开一个 location —— 下面的 location / 没关缓冲，SSE 推流会被卡住。
     location = /api/mcp {
@@ -330,6 +337,11 @@ else
 
 # 由 setup-mcp-proxy.sh 生成
 ${CADDY_SITE} {
+    # 同上：不让 Komari 的 SPA 回落把 /.well-known/* 渲染成 index.html
+    handle /.well-known/* {
+        respond 404
+    }
+
     # MCP 入口 A：客户端自带 Authorization 头时走这里（凭据不进 URL）。
     # Caddy 的 reverse_proxy 默认就支持流式响应，无需额外配置。
     handle /api/mcp* {
@@ -402,6 +414,14 @@ MCP_BODY=$(curl -s --max-time 20 -X POST "$URL" \
     -H 'Content-Type: application/json' \
     -H 'Accept: application/json, text/event-stream' \
     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"setup-check","version":"1"}}}' 2>/dev/null || true)
+
+# discovery 路径必须是 404：返回 200+HTML 会让客户端解析失败并误报 "Couldn't reach"
+WK=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "$BASE/.well-known/oauth-protected-resource" || echo 000)
+if [ "$WK" = "404" ]; then
+    ok "/.well-known/* 正确返回 404"
+else
+    warn "/.well-known/oauth-protected-resource 返回 $WK（应为 404）——客户端可能因此连接失败"
+fi
 
 MCP_OK=0
 case "$MCP_BODY" in
