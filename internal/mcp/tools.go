@@ -53,11 +53,7 @@ func registerMonitoringTools(s *mcp.Server, p Policy) {
 		if in.UUID != "" {
 			params["uuid"] = in.UUID
 		}
-		raw, err := callRPC(ctx, p, "common:getNodes", params)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "common:getNodes", params)
 	})
 
 	// common:getNodesLatestStatus —— 最新一次上报（在线与否、当前负载）
@@ -75,11 +71,7 @@ func registerMonitoringTools(s *mcp.Server, p Policy) {
 		default:
 			params["uuids"] = in.UUIDs
 		}
-		raw, err := callRPC(ctx, p, "common:getNodesLatestStatus", params)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "common:getNodesLatestStatus", params)
 	})
 
 	// public:getRecordsByUUID —— 历史负载曲线
@@ -98,11 +90,7 @@ func registerMonitoringTools(s *mcp.Server, p Policy) {
 		if in.Hours > 0 {
 			params["hours"] = in.Hours
 		}
-		raw, err := callRPC(ctx, p, "public:getRecordsByUUID", params)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "public:getRecordsByUUID", params)
 	})
 
 	// public:getClientRecentRecords —— 最近一段时间的原始上报
@@ -113,11 +101,7 @@ func registerMonitoringTools(s *mcp.Server, p Policy) {
 		if in.UUID == "" {
 			return errResult(fmt.Errorf("uuid 不能为空，可先调用 list_servers 获取"))
 		}
-		raw, err := callRPC(ctx, p, "public:getClientRecentRecords", map[string]any{"uuid": in.UUID})
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "public:getClientRecentRecords", map[string]any{"uuid": in.UUID})
 	})
 
 	// public:getPingRecords —— 网络延迟/连通性
@@ -135,11 +119,7 @@ func registerMonitoringTools(s *mcp.Server, p Policy) {
 		if in.Hours > 0 {
 			params["hours"] = in.Hours
 		}
-		raw, err := callRPC(ctx, p, "public:getPingRecords", params)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "public:getPingRecords", params)
 	})
 
 	// 告警规则总览：合并负载告警与离线告警两类
@@ -147,11 +127,11 @@ func registerMonitoringTools(s *mcp.Server, p Policy) {
 		Name:        "list_alert_rules",
 		Description: "列出所有已配置的告警规则，包含负载类告警（CPU/内存等阈值）与离线告警。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-		load, err := callRPC(ctx, p, "admin:getAllLoadNotifications", map[string]any{})
+		load, err := callRPC(ctx, p, "admin:getAllLoadNotifications", nil)
 		if err != nil {
 			return errResult(err)
 		}
-		offline, err := callRPC(ctx, p, "admin:listOfflineNotifications", map[string]any{})
+		offline, err := callRPC(ctx, p, "admin:listOfflineNotifications", nil)
 		if err != nil {
 			return errResult(err)
 		}
@@ -178,17 +158,13 @@ type getServerInput struct {
 }
 
 func registerManagementTools(s *mcp.Server, p Policy) {
-	// admin:listClients —— 管理视角的节点清单
+	// admin:listClients —— 管理视角的节点清单。未开启高危档时 token 字段会被剔除（见 policy.go）
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "list_servers_admin",
 		Description: "以管理视角列出所有节点（含 list_servers 看不到的管理字段，如排序权重、分组、隐藏状态）。" +
 			"日常查询用 list_servers 即可，需要管理字段时才用这个。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, any, error) {
-		raw, err := callRPC(ctx, p, "admin:listClients", map[string]any{})
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "admin:listClients", nil)
 	})
 
 	// admin:getClient
@@ -199,11 +175,7 @@ func registerManagementTools(s *mcp.Server, p Policy) {
 		if in.UUID == "" {
 			return errResult(fmt.Errorf("uuid 不能为空"))
 		}
-		raw, err := callRPC(ctx, p, "admin:getClient", map[string]any{"uuid": in.UUID})
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "admin:getClient", map[string]any{"uuid": in.UUID})
 	})
 
 	// admin:addClient —— 注意：返回体含 token，是探针接入凭据
@@ -217,18 +189,15 @@ func registerManagementTools(s *mcp.Server, p Policy) {
 		if in.Name != "" {
 			params["name"] = in.Name
 		}
-		raw, err := callRPC(ctx, p, "admin:addClient", params)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, "admin:addClient", params)
 	})
 
 	// admin:editClient —— 局部更新
 	mcp.AddTool(s, &mcp.Tool{
 		Name: "edit_server",
 		Description: "修改节点配置（局部更新，只需传要改的字段）。" +
-			"可用字段名请先用 get_server_detail 查看当前节点结构。",
+			"可用字段名请先用 get_server_detail 查看当前节点结构。" +
+			"未开启高危档时不允许修改 token（探针接入凭据）。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in editServerInput) (*mcp.CallToolResult, any, error) {
 		if in.UUID == "" {
 			return errResult(fmt.Errorf("uuid 不能为空"))

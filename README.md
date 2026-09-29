@@ -321,7 +321,10 @@ Every RPC method is classified into one of three tiers:
 | `manage` | Reversible business configuration changes | exposed |
 | `dangerous` | Remote command execution, raw SQL, file writes, credential reads, security-setting changes, irreversible deletes | **blocked** |
 
-Of the 90 registered methods, 68 are exposed and 22 are withheld by default.
+Of the 94 registered methods, 65 are exposed and 29 are withheld by default.
+
+Exposed methods whose responses embed credentials (the agent token in client listings, the API key in settings)
+have those fields stripped unless the dangerous tier is enabled — see [`internal/mcp/README.md`](./internal/mcp/README.md).
 
 ### Environment variables
 

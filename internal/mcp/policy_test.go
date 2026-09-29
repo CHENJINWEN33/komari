@@ -29,6 +29,9 @@ func TestClassifyMethod(t *testing.T) {
 		{"admin:addPingTask", TierManage},
 		{"admin:addLoadNotification", TierManage},
 		{"admin:sendNotification", TierManage},
+		// test* 会真实发出通知 / 发起外部请求，不算只读
+		{"admin:testSendMessage", TierManage},
+		{"admin:testGeoip", TierManage},
 
 		// 高危：远程执行与裸 SQL
 		{"admin:exec", TierDangerous},
@@ -41,6 +44,9 @@ func TestClassifyMethod(t *testing.T) {
 
 		// 高危：凭据与安全设置
 		{"admin:getClientToken", TierDangerous},
+		{"admin:getOidcProvider", TierDangerous},
+		{"admin:getMessageSenderProvider", TierDangerous},
+		{"admin:getPluginConfiguration", TierDangerous},
 		{"admin:editSettings", TierDangerous},
 
 		// 高危：不可逆删除
