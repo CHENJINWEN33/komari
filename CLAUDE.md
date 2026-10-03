@@ -91,8 +91,18 @@ if origin != "" && allowOrigin == "" {
 `127.0.0.1:25774`，但浏览器发来的 `Origin: http://localhost:5173` **原样转发**。
 两者不相等 → 403。GET 请求浏览器不带 `Origin`，所以畅通无阻，症状才显得怪。
 
-**当前状态：已采用方案 1** —— `http://localhost:5173` 已加入后台
-「设置 → 站点 → API CORS 允许列表」，5173 的 POST 已验证通过（403 → 401）。
+**本机状态（2026-09-16 记录）**：当时已按方案 1 把 `http://localhost:5173`
+加进后台「设置 → 站点 → API CORS 允许列表」，POST 从 403 变成 401。
+
+这条配置存在 `komari.db` 里（已 gitignore），不随仓库走——换机器、重装、
+重置数据库后都会消失，所以别把上面这句当成当前事实。先验证：
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+     -H "Origin: http://localhost:5173" http://127.0.0.1:25774/api/rpc2
+# 401 = Origin 已放行（已经走到鉴权了）；403 = 没放行，按下面方案 1 重做
+# 000 = 后端没起，先 go run . server
+```
 
 **解法（二选一）**：
 
@@ -188,6 +198,18 @@ git rebase upstream/main                   # 在 feature 分支上做
 
 环境变量：`KOMARI_MCP_ENABLED`（默认 true）、`KOMARI_MCP_ALLOW_DANGEROUS`（默认 false）、
 `KOMARI_MCP_TRUST_PROXY_HOST`（默认 false，反代部署被 403 时打开）。
+
+### 对外暴露：`setup-mcp-proxy.sh`（Linux 部署，仓库根目录）
+
+把 MCP 端点通过 HTTPS 暴露给 AI 客户端的一键脚本，`sudo bash setup-mcp-proxy.sh`。
+注意它面向的是 `/opt/komari` + systemd 的 Linux 部署，跟上面几节的 Windows 本地开发不是一回事。
+
+做四件事：在已有 nginx / Caddy 里**新增**站点（不覆盖现有配置）；开两个入口
+——`/api/mcp`（客户端自带 `Authorization` 头，推荐，凭据不进 URL）和
+`/mcp-<密钥>`（反代代为注入，给填不了请求头的客户端）；把 Komari 改成只监听
+`127.0.0.1` 并设好反代必需的环境变量；最后验证并打印可直接粘贴的 URL。
+
+可重复运行。写入一律新建或追加、改动前备份、应用前做语法校验，宁可中止也不破坏现有配置。
 
 改动 `internal/mcp/` 后务必跑 `go test ./internal/mcp/...` ——
 其中 `server_test.go` 会通过内存传输跑一次真实 MCP 握手，能抓到工具注册失败。
