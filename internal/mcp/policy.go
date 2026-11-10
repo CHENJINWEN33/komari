@@ -196,17 +196,33 @@ func (p Policy) RedactedFields(method string) []string {
 	return sensitiveResultFields[method]
 }
 
-// ForbiddenParam 返回 params 中第一个当前策略不允许写入的参数名，没有则返回空串。
+// ForbiddenParam 返回 params 中第一个当前策略不允许写入的参数（以 sensitiveParams
+// 里登记的规范名返回），没有则返回空串。
+//
+// 不能只按键名精确匹配：这些参数会原样交给 GORM 的 Updates(map)，而 GORM 既认
+// 列名也认 Go 字段名（"Token"），认不出的键还会直接当列名拼进 SQL，SQLite / MySQL
+// 的列名又不区分大小写（"TOKEN"）。所以按「最终会落到哪一列」来比对。
 func (p Policy) ForbiddenParam(method string, params map[string]any) string {
 	if p.AllowDangerous {
 		return ""
 	}
 	for _, key := range sensitiveParams[method] {
-		if _, ok := params[key]; ok {
-			return key
+		for name := range params {
+			if strings.EqualFold(columnOf(name), key) {
+				return key
+			}
 		}
 	}
 	return ""
+}
+
+// columnOf 把参数名归一化成它在 SQL 里指向的列名：
+// 去掉表名限定（clients.token）和标识符引号（`token`、"token"、[token]）。
+func columnOf(param string) string {
+	if i := strings.LastIndex(param, "."); i >= 0 {
+		param = param[i+1:]
+	}
+	return strings.Trim(param, "`\"'[] \t\r\n")
 }
 
 // Enabled 返回 MCP 端点是否启用。

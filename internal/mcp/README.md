@@ -89,7 +89,8 @@ DELETE /api/mcp   结束会话
 | `admin:getSettings` | `api_key`、`auto_discovery_key`、`metric_db_dsn` | API Key、自动注册密钥、可能带密码的数据库 DSN |
 
 同理，`admin:editClient` 会把参数原样写库，未开启高危档时拒绝携带 `token` 参数，
-避免借「编辑节点」改写探针凭据。
+避免借「编辑节点」改写探针凭据。比对的是参数最终落到的列，而不是字面拼写：
+`Token`、`TOKEN`、`clients.token` 等写法同样会被拒绝。
 
 `admin:addClient`（`add_server`）按设计仍返回新节点的 token —— 这是接入新探针的必需信息。
 

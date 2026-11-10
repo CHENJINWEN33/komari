@@ -8,12 +8,14 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/komari-monitor/komari/cmd/flags"
+	"github.com/komari-monitor/komari/database/clients"
 	"github.com/komari-monitor/komari/database/dbcore"
 	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/internal/config"
@@ -94,6 +96,63 @@ func TestPolicyRedactionOnlyWhenLocked(t *testing.T) {
 	}
 	if locked.ForbiddenParam("admin:editClient", map[string]any{"uuid": "x", "name": "n"}) != "" {
 		t.Error("普通字段不应被拒绝")
+	}
+	// 名字里带 token 但不是 token 列的字段不能误伤
+	if locked.ForbiddenParam("admin:editClient", map[string]any{"uuid": "x", "token_note": "n"}) != "" {
+		t.Error("token_note 不是 token 列，不应被拒绝")
+	}
+}
+
+// tokenParamVariants 是同样会落到 clients.token 列的参数名写法：
+// GORM 认 Go 字段名（Token），认不出的键直接当列名，而列名不区分大小写。
+var tokenParamVariants = []string{"Token", "TOKEN", "ToKeN", "clients.token", "`token`", `"token"`}
+
+func TestForbiddenParamMatchesColumnNotSpelling(t *testing.T) {
+	locked := Policy{AllowDangerous: false}
+	for _, name := range tokenParamVariants {
+		if got := locked.ForbiddenParam("admin:editClient", map[string]any{"uuid": "x", name: "y"}); got != "token" {
+			t.Errorf("参数名 %q 应被识别为 token，got %q", name, got)
+		}
+	}
+}
+
+// 回归：只拦小写 token 时，传 "Token" 就能把探针凭据改成任意值。
+// 这里直接读库确认凭据没变，而不是只看工具有没有报错。
+func TestClientTokenNotRewritableViaParamSpelling(t *testing.T) {
+	t.Setenv(envAllowDangerous, "false")
+	cs := connectTestClient(t)
+
+	text, isErr := callToolJSON(t, cs, "add_server", map[string]any{"name": "spelling-test"})
+	if isErr {
+		t.Fatalf("add_server 失败: %s", text)
+	}
+	var added struct {
+		UUID  string `json:"uuid"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal([]byte(text), &added); err != nil || added.UUID == "" || added.Token == "" {
+		t.Fatalf("add_server 返回结构不符合预期: %s", text)
+	}
+
+	for i, name := range tokenParamVariants {
+		// 每次用不同的值：token 列有唯一约束，重复值会被数据库挡下，掩盖真正的结论。
+		value := fmt.Sprintf("attacker-chosen-%d", i)
+		for _, call := range []struct {
+			tool string
+			args map[string]any
+		}{
+			{"edit_server", map[string]any{"uuid": added.UUID, "fields": map[string]any{name: value}}},
+			{"komari_call", map[string]any{"method": "admin:editClient", "params": map[string]any{"uuid": added.UUID, name: value}}},
+		} {
+			if text, isErr := callToolJSON(t, cs, call.tool, call.args); !isErr {
+				t.Errorf("%s 不应接受参数名 %q: %s", call.tool, name, text)
+			}
+			if now, err := clients.GetClientTokenByUUID(added.UUID); err != nil {
+				t.Fatalf("读取 token 失败: %v", err)
+			} else if now != added.Token {
+				t.Fatalf("%s 用参数名 %q 改写了探针 token", call.tool, name)
+			}
+		}
 	}
 }
 
