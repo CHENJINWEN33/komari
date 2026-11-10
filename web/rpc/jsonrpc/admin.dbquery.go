@@ -244,9 +244,11 @@ func listDatabaseTables(ctx context.Context, target string) (databaseTablesRespo
 	)
 	switch target {
 	case databaseTargetMain:
-		statement, err := tableListSQL(metric.DriverSQLite)
-		if err != nil {
-			return databaseTablesResponse{}, err
+		// 不能用 := 接 err：会在 case 作用域里遮蔽外层 err，
+		// 导致下一行 openDatabaseRows 的错误丢失，随后对 nil rows / release 解引用。
+		statement, stmtErr := tableListSQL(metric.DriverSQLite)
+		if stmtErr != nil {
+			return databaseTablesResponse{}, stmtErr
 		}
 		rows, actualDriver, release, err = openDatabaseRows(ctx, target, statement)
 	case databaseTargetMetrics:

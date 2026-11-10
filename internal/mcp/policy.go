@@ -10,6 +10,9 @@ package mcp
 import (
 	"os"
 	"strings"
+
+	"github.com/komari-monitor/komari/internal/config"
+	"github.com/komari-monitor/komari/internal/metricstore"
 )
 
 // Tier 是单个 RPC 方法的风险档位。
@@ -61,8 +64,12 @@ var dangerousMethods = map[string]bool{
 	"admin:fileChown":  true,
 	"admin:fileMkdir":  true,
 
-	// 凭据读取
-	"admin:getClientToken": true,
+	// 凭据读取。后三个返回的配置里，密钥藏在不透明的 JSON 字符串（addition）
+	// 或插件自定义结构中，无法按字段剥离，只能整体归入高危。
+	"admin:getClientToken":           true,
+	"admin:getOidcProvider":          true,
+	"admin:getMessageSenderProvider": true,
+	"admin:getPluginConfiguration":   true,
 
 	// 安全设置变更（可关闭 CORS 校验、轮换 API Key、改动 OIDC / 终端配置）
 	"admin:editSettings":             true,
@@ -90,7 +97,34 @@ var dangerousMethods = map[string]bool{
 
 // readOnlyAdminPrefixes 用于把 admin: 命名空间里的查询类方法归入 read 档。
 // 命名约定来自上游：查询方法一律以这些动词开头。
-var readOnlyAdminPrefixes = []string{"get", "list", "test"}
+//
+// test* 不在此列：admin:testSendMessage 会真实发出一条通知，有外部副作用。
+var readOnlyAdminPrefixes = []string{"get", "list"}
+
+// sensitiveResultFields 列出返回值里夹带凭据的非高危方法，以及要剥离的字段名。
+//
+// 这些方法本身是日常查询（列节点、看设置），不能整体归入高危；
+// 但返回体里混着凭据，原样交给 agent 就等于绕过了 getClientToken 的高危限制。
+// 所以在未开启高危档时，按字段名递归剔除这些值。
+var sensitiveResultFields = map[string][]string{
+	// models.Client 带 token 字段，与 admin:getClientToken 返回的是同一个凭据。
+	// common:getNodes 只对非管理员清空 token，而 MCP 以管理员身份调用，同样会带出来。
+	"common:getNodes":   {"token"},
+	"admin:listClients": {"token"},
+	"admin:getClient":   {"token"},
+	// models.Session.session 就是登录 Cookie 的值
+	"admin:getSessions": {"session"},
+	// config.GetAll 返回整张配置表
+	"admin:getSettings": {config.ApiKeyKey, config.AutoDiscoveryKeyKey, metricstore.MetricDBDSNKey},
+}
+
+// sensitiveParams 列出非高危方法中禁止写入的参数。
+//
+// admin:editClient 会把参数原样写进 clients 表，传 token 就能改写探针凭据：
+// 既能冒充探针上报，也会让现有探针掉线。
+var sensitiveParams = map[string][]string{
+	"admin:editClient": {"token"},
+}
 
 // ClassifyMethod 返回方法的风险档位。
 //
@@ -129,6 +163,8 @@ func ClassifyMethod(method string) Tier {
 	return TierManage
 }
 
+const envAllowDangerous = "KOMARI_MCP_ALLOW_DANGEROUS"
+
 // Policy 是一次 MCP 服务实例的暴露策略快照。
 type Policy struct {
 	// AllowDangerous 为 true 时才放行 TierDangerous 的方法。
@@ -140,7 +176,7 @@ type Policy struct {
 //	KOMARI_MCP_ALLOW_DANGEROUS=true  开启高危档（默认关闭）
 func LoadPolicy() Policy {
 	return Policy{
-		AllowDangerous: envBool("KOMARI_MCP_ALLOW_DANGEROUS", false),
+		AllowDangerous: envBool(envAllowDangerous, false),
 	}
 }
 
@@ -150,6 +186,43 @@ func (p Policy) Allows(method string) bool {
 		return p.AllowDangerous
 	}
 	return true
+}
+
+// RedactedFields 返回在当前策略下需要从该方法返回值中剔除的字段名。
+func (p Policy) RedactedFields(method string) []string {
+	if p.AllowDangerous {
+		return nil
+	}
+	return sensitiveResultFields[method]
+}
+
+// ForbiddenParam 返回 params 中第一个当前策略不允许写入的参数（以 sensitiveParams
+// 里登记的规范名返回），没有则返回空串。
+//
+// 不能只按键名精确匹配：这些参数会原样交给 GORM 的 Updates(map)，而 GORM 既认
+// 列名也认 Go 字段名（"Token"），认不出的键还会直接当列名拼进 SQL，SQLite / MySQL
+// 的列名又不区分大小写（"TOKEN"）。所以按「最终会落到哪一列」来比对。
+func (p Policy) ForbiddenParam(method string, params map[string]any) string {
+	if p.AllowDangerous {
+		return ""
+	}
+	for _, key := range sensitiveParams[method] {
+		for name := range params {
+			if strings.EqualFold(columnOf(name), key) {
+				return key
+			}
+		}
+	}
+	return ""
+}
+
+// columnOf 把参数名归一化成它在 SQL 里指向的列名：
+// 去掉表名限定（clients.token）和标识符引号（`token`、"token"、[token]）。
+func columnOf(param string) string {
+	if i := strings.LastIndex(param, "."); i >= 0 {
+		param = param[i+1:]
+	}
+	return strings.Trim(param, "`\"'[] \t\r\n")
 }
 
 // Enabled 返回 MCP 端点是否启用。

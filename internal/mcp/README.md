@@ -66,12 +66,33 @@ DELETE /api/mcp   结束会话
 | `dangerous` | 远程命令执行、裸 SQL、文件写、凭据读取、安全设置变更、不可逆删除 | **关闭** |
 
 判定顺序：显式高危名单 → `public:`/`common:` 命名空间归 read →
-`admin:` 下以 `get`/`list`/`test` 开头归 read → 其余归 manage。
+`admin:` 下以 `get`/`list` 开头归 read → 其余归 manage。
+
+`test*` 不归 read：`admin:testSendMessage` 会真实发出一条通知，有外部副作用。
 
 **未知方法落 manage 而非 read**，保证上游新增方法不会因策略疏漏被当成安全只读接口。
 
 高危名单收录标准是「一次调用即可造成不可逆后果，或可直接扩大调用者自身权限」，
 其中 `admin:editSettings` 被列为高危的原因是它能改 API Key、关闭 CORS 校验等安全开关。
+`admin:getOidcProvider` / `getMessageSenderProvider` / `getPluginConfiguration` 返回的配置里
+含 OAuth client secret、通知渠道 token 等，且藏在不透明的 JSON 字符串中无法按字段剥离，因此整体归入高危。
+
+## 凭据剥离
+
+有些方法本身是日常查询，但返回体里夹带凭据。未开启高危档时，`callRPC` 会按字段名
+递归**删除**这些值（删除而非替换为占位符，防止 agent 把占位符回写进数据库）：
+
+| 方法 | 剔除字段 | 原因 |
+|---|---|---|
+| `common:getNodes`、`admin:listClients`、`admin:getClient` | `token` | 与 `admin:getClientToken` 是同一个探针凭据；`getNodes` 只对非管理员清空它，而 MCP 以管理员身份调用 |
+| `admin:getSessions` | `session` | 即登录 Cookie 的值 |
+| `admin:getSettings` | `api_key`、`auto_discovery_key`、`metric_db_dsn` | API Key、自动注册密钥、可能带密码的数据库 DSN |
+
+同理，`admin:editClient` 会把参数原样写库，未开启高危档时拒绝携带 `token` 参数，
+避免借「编辑节点」改写探针凭据。比对的是参数最终落到的列，而不是字面拼写：
+`Token`、`TOKEN`、`clients.token` 等写法同样会被拒绝。
+
+`admin:addClient`（`add_server`）按设计仍返回新节点的 token —— 这是接入新探针的必需信息。
 
 ## 环境变量
 
@@ -98,5 +119,6 @@ agent 将能在所有被监控主机上执行任意命令。请按此前提管�
 调用走 `jsonrpc.OnInternalRequest`，即**进程内**进入 RPC 分发器，
 不绕 HTTP、不额外占连接，也不会与主进程争抢 SQLite 文件。
 
-所有调用（含语义化工具）统一经过 `Policy.Allows` 校验，
+所有调用（含语义化工具与 `komari_call`）统一经过 `callRPC`：
+档位校验、敏感参数拦截、返回值凭据剥离都在这一处完成，
 即使语义化工具写错方法名也不会越过高危档。

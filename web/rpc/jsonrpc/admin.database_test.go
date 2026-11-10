@@ -1,6 +1,7 @@
 package jsonrpc
 
 import (
+	"context"
 	"testing"
 
 	"github.com/komari-monitor/komari/pkg/metric"
@@ -70,5 +71,16 @@ func TestDatabaseMaintenanceResponsePreservesLegacyMainSizes(t *testing.T) {
 				t.Fatalf("legacy sizes changed: before=%d after=%d size=%d", response.Before, response.After, response.Size)
 			}
 		})
+	}
+}
+
+// 主库查询失败时必须把错误返回给调用方，而不是吞掉后对 nil rows 解引用 panic。
+func TestListDatabaseTablesReturnsQueryError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := listDatabaseTables(ctx, databaseTargetMain)
+	if err == nil {
+		t.Fatal("expected error from a cancelled context")
 	}
 }

@@ -40,7 +40,8 @@ func testIpAddr(t *testing.T) {
 			t.Errorf("Country information is missing for IP %s", ipaddr)
 		}
 	} else {
-		t.Errorf("GeoIP record is nil for IP %s", ipaddr)
+		// 后面要读 record 的字段，继续执行只会空指针 panic，掩盖真正的失败原因。
+		t.Fatalf("GeoIP record is nil for IP %s", ipaddr)
 	}
 
 	t.Logf("IPv4:[%s]%s - %s", ipaddr, record.ISOCode, record.Name)
@@ -57,7 +58,7 @@ func testIpAddr(t *testing.T) {
 			t.Errorf("Country information is missing for IPv6 %s", ipaddr)
 		}
 	} else {
-		t.Errorf("GeoIP record is nil for IPv6 %s", ipaddr)
+		t.Fatalf("GeoIP record is nil for IPv6 %s", ipaddr)
 	}
 	t.Logf("IPv6:[%s]%s - %s", ipaddr, record.ISOCode, record.Name)
 }

@@ -13,9 +13,11 @@ package mcp
 //   - 统一过策略。所有调用（含语义化工具）都经过 policy.go 的档位校验。
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/komari-monitor/komari/pkg/rpc"
 	"github.com/komari-monitor/komari/utils"
@@ -27,13 +29,22 @@ const serverName = "komari"
 
 // callRPC 以管理员身份在进程内调用一个 Komari RPC 方法。
 //
-// 调用前强制过策略校验：即使语义化工具写错了方法名，也不会越过 dangerous 档。
-func callRPC(ctx context.Context, p Policy, method string, params any) (any, error) {
+// 所有策略校验集中在这里，语义化工具与 komari_call 共用同一条路径：
+//   - 方法档位：即使语义化工具写错了方法名，也不会越过 dangerous 档；
+//   - 敏感参数：拒绝借非高危方法改写凭据（如 editClient 的 token）；
+//   - 敏感返回：剔除非高危方法返回体里夹带的凭据（如 listClients 的 token）。
+func callRPC(ctx context.Context, p Policy, method string, params map[string]any) (any, error) {
 	if !p.Allows(method) {
+		return nil, deniedError(method)
+	}
+	if key := p.ForbiddenParam(method, params); key != "" {
 		return nil, fmt.Errorf(
-			"方法 %s 属于 %s 档，当前未启用。如确需使用，请设置环境变量 KOMARI_MCP_ALLOW_DANGEROUS=true 并重启 Komari",
-			method, ClassifyMethod(method),
+			"不允许通过 %s 修改参数 %s（涉及凭据）。如确需修改，请设置环境变量 %s=true 并重启 Komari",
+			method, key, envAllowDangerous,
 		)
+	}
+	if params == nil {
+		params = map[string]any{}
 	}
 
 	resp := jsonrpc.OnInternalRequest(ctx, rpc.RoleAdmin, method, params)
@@ -43,7 +54,63 @@ func callRPC(ctx context.Context, p Policy, method string, params any) (any, err
 	if resp.Error != nil {
 		return nil, fmt.Errorf("调用 %s 失败: %s", method, resp.Error.Message)
 	}
+	if fields := p.RedactedFields(method); len(fields) > 0 {
+		return redact(resp.Result, fields)
+	}
 	return resp.Result, nil
+}
+
+func deniedError(method string) error {
+	return fmt.Errorf(
+		"方法 %s 属于 %s 档，当前未启用。如确需使用，请设置环境变量 %s=true 并重启 Komari",
+		method, ClassifyMethod(method), envAllowDangerous,
+	)
+}
+
+// redact 把结果转成通用 JSON 结构，并递归删除指定字段。
+//
+// 删除而不是替换成占位符：edit_server 会把 agent 传来的字段原样写库，
+// 如果 agent 把带占位符的对象整体回写，占位符就会覆盖真实值。
+func redact(v any, fields []string) (any, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("序列化结果失败: %w", err)
+	}
+	// UseNumber：避免 int64（如以字节计的流量上限）经 float64 往返后丢精度。
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	var generic any
+	if err := dec.Decode(&generic); err != nil {
+		return nil, fmt.Errorf("解析结果失败: %w", err)
+	}
+	stripFields(generic, fields)
+	return generic, nil
+}
+
+func stripFields(v any, fields []string) {
+	switch t := v.(type) {
+	case map[string]any:
+		for _, f := range fields {
+			delete(t, f)
+		}
+		for _, child := range t {
+			stripFields(child, fields)
+		}
+	case []any:
+		for _, child := range t {
+			stripFields(child, fields)
+		}
+	}
+}
+
+// rpcTool 调用一个 RPC 方法，并把结果或错误包装成工具返回值。
+// 绝大多数工具就是「拼参数 → 调方法 → 原样返回」，统一走这里。
+func rpcTool(ctx context.Context, p Policy, method string, params map[string]any) (*mcp.CallToolResult, any, error) {
+	raw, err := callRPC(ctx, p, method, params)
+	if err != nil {
+		return errResult(err)
+	}
+	return jsonResult(raw)
 }
 
 // jsonResult 把任意结果序列化成 MCP 的文本内容。
@@ -79,7 +146,8 @@ func NewServer() *mcp.Server {
 		"若封装好的工具不满足需求，用 komari_list_methods 查看全部可用 RPC 方法，" +
 		"komari_method_help 查看某方法的参数说明，再用 komari_call 调用。"
 	if !p.AllowDangerous {
-		instructions += "\n\n注意：远程命令执行、裸 SQL、文件写入等高危操作当前已禁用。"
+		instructions += "\n\n注意：远程命令执行、裸 SQL、文件写入等高危操作当前已禁用；" +
+			"探针 token、登录会话、API Key 等凭据字段会从返回结果中剔除。"
 	}
 
 	s := mcp.NewServer(&mcp.Implementation{
@@ -118,7 +186,7 @@ func registerIntrospectionTools(s *mcp.Server, p Policy) {
 		Description: "列出当前 MCP 策略下可调用的全部 Komari RPC 方法，并标注每个方法的风险档位" +
 			"（read 只读 / manage 管理 / dangerous 高危）。当封装好的工具不够用时，先调这个。",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in listMethodsInput) (*mcp.CallToolResult, any, error) {
-		raw, err := callRPC(ctx, p, "rpc.methods", map[string]any{})
+		raw, err := callRPC(ctx, p, "rpc.methods", nil)
 		if err != nil {
 			return errResult(err)
 		}
@@ -143,7 +211,7 @@ func registerIntrospectionTools(s *mcp.Server, p Policy) {
 		}
 		out := make([]methodInfo, 0, len(names))
 		for _, name := range names {
-			if in.Namespace != "" && !hasNamespace(name, in.Namespace) {
+			if in.Namespace != "" && !strings.HasPrefix(name, in.Namespace+":") {
 				continue
 			}
 			if !p.Allows(name) {
@@ -162,8 +230,9 @@ func registerIntrospectionTools(s *mcp.Server, p Policy) {
 		if in.Method == "" {
 			return errResult(fmt.Errorf("method 不能为空"))
 		}
+		// callRPC 校验的是 rpc.help 本身，目标方法要单独过一遍策略。
 		if !p.Allows(in.Method) {
-			return errResult(fmt.Errorf("方法 %s 属于 %s 档，当前未启用", in.Method, ClassifyMethod(in.Method)))
+			return errResult(deniedError(in.Method))
 		}
 		raw, err := callRPC(ctx, p, "rpc.help", map[string]any{"method": in.Method})
 		if err != nil {
@@ -183,18 +252,6 @@ func registerIntrospectionTools(s *mcp.Server, p Policy) {
 		if in.Method == "" {
 			return errResult(fmt.Errorf("method 不能为空"))
 		}
-		params := in.Params
-		if params == nil {
-			params = map[string]any{}
-		}
-		raw, err := callRPC(ctx, p, in.Method, params)
-		if err != nil {
-			return errResult(err)
-		}
-		return jsonResult(raw)
+		return rpcTool(ctx, p, in.Method, in.Params)
 	})
-}
-
-func hasNamespace(method, ns string) bool {
-	return len(method) > len(ns) && method[:len(ns)] == ns && method[len(ns)] == ':'
 }
